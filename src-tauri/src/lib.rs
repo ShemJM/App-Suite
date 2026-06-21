@@ -18,7 +18,7 @@ async fn open_app_window(
         .title(title)
         .inner_size(width, height)
         .min_inner_size(900.0, 600.0)
-        .center(true)
+        .center()
         .build()
         .map_err(|e| e.to_string())?;
 
