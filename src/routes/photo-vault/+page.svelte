@@ -123,6 +123,7 @@
     if (selectedIndex === null) return;
     if (e.key === 'ArrowLeft') { e.preventDefault(); prev(); }
     else if (e.key === 'ArrowRight') { e.preventDefault(); next(); }
+    else if (e.key === 'Delete') { e.preventDefault(); deletePhoto(); }
     else if (e.key === 'Escape') closeLightbox();
   }
 </script>
@@ -515,17 +516,17 @@
 
   .lightbox {
     position: relative;
-    max-width: min(90vw, 1200px);
-    max-height: 90vh;
+    width: min(92vw, 1100px);
+    height: 84vh;
     display: flex;
     flex-direction: column;
-    align-items: center;
     gap: 0.75rem;
   }
 
   .lightbox img {
-    max-width: 100%;
-    max-height: calc(90vh - 60px);
+    flex: 1;
+    min-height: 0;
+    width: 100%;
     object-fit: contain;
     border-radius: var(--radius-md);
     box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
