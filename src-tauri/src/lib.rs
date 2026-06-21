@@ -61,6 +61,11 @@ fn mtime_timestamp(path: &Path) -> Option<i64> {
 }
 
 #[tauri::command]
+fn delete_photo(path: String) -> Result<(), String> {
+    trash::delete(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn scan_directory(path: String) -> Result<Vec<PhotoEntry>, String> {
     let mut photos: Vec<PhotoEntry> = WalkDir::new(&path)
         .follow_links(true)
@@ -113,7 +118,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![open_app_window, scan_directory])
+        .invoke_handler(tauri::generate_handler![open_app_window, scan_directory, delete_photo])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

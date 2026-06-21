@@ -25,7 +25,8 @@
   let photos = $state<PhotoEntry[]>([]);
   let scanning = $state(false);
   let scanError = $state<string | null>(null);
-  let selectedPhoto = $state<PhotoEntry | null>(null);
+  let selectedIndex = $state<number | null>(null);
+  let selectedPhoto = $derived(selectedIndex !== null ? photos[selectedIndex] : null);
 
   let monthGroups = $derived.by((): MonthGroup[] => {
     if (!photos.length) return [];
@@ -84,7 +85,49 @@
   function folderName(path: string) {
     return path.split('/').pop() ?? path;
   }
+
+  function selectPhoto(photo: PhotoEntry) {
+    selectedIndex = photos.indexOf(photo);
+  }
+
+  function prev() {
+    if (selectedIndex !== null && selectedIndex > 0) selectedIndex -= 1;
+  }
+
+  function next() {
+    if (selectedIndex !== null && selectedIndex < photos.length - 1) selectedIndex += 1;
+  }
+
+  function closeLightbox() {
+    selectedIndex = null;
+  }
+
+  async function deletePhoto() {
+    if (selectedIndex === null || !selectedPhoto) return;
+    const path = selectedPhoto.path;
+    const idx = selectedIndex;
+
+    // Remove from list first for instant feedback
+    photos = photos.filter((_, i) => i !== idx);
+
+    if (photos.length === 0) {
+      selectedIndex = null;
+    } else {
+      selectedIndex = Math.min(idx, photos.length - 1);
+    }
+
+    await invoke('delete_photo', { path }).catch(console.error);
+  }
+
+  function handleKeydown(e: KeyboardEvent) {
+    if (selectedIndex === null) return;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); prev(); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); next(); }
+    else if (e.key === 'Escape') closeLightbox();
+  }
 </script>
+
+<svelte:window onkeydown={handleKeydown} />
 
 <div class="photo-vault">
   <!-- Sidebar -->
@@ -157,7 +200,7 @@
               {#each group.photos as photo (photo.path)}
                 <button
                   class="photo-thumb"
-                  onclick={() => selectedPhoto = photo}
+                  onclick={() => selectPhoto(photo)}
                   title={photo.filename}
                 >
                   <img
@@ -177,20 +220,31 @@
 </div>
 
 <!-- Lightbox -->
-{#if selectedPhoto}
+{#if selectedPhoto && selectedIndex !== null}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="lightbox-backdrop" onclick={() => selectedPhoto = null}>
+  <div class="lightbox-backdrop" onclick={closeLightbox}>
     <div class="lightbox" onclick={(e) => e.stopPropagation()}>
       <img src={photoUrl(selectedPhoto.path)} alt={selectedPhoto.filename} />
-      <div class="lightbox-info">
-        <span class="lightbox-name">{selectedPhoto.filename}</span>
-        <span class="lightbox-date">
-          {new Date(selectedPhoto.timestamp).toLocaleDateString(undefined, {
-            year: 'numeric', month: 'long', day: 'numeric'
-          })}
-        </span>
+
+      <div class="lightbox-bar">
+        <div class="lightbox-info">
+          <span class="lightbox-name">{selectedPhoto.filename}</span>
+          <span class="lightbox-date">
+            {new Date(selectedPhoto.timestamp).toLocaleDateString(undefined, {
+              year: 'numeric', month: 'long', day: 'numeric'
+            })}
+          </span>
+          <span class="lightbox-counter">{selectedIndex + 1} / {photos.length}</span>
+        </div>
+
+        <div class="lightbox-actions">
+          <button class="lb-btn" onclick={prev} disabled={selectedIndex === 0} title="Previous (←)">‹</button>
+          <button class="lb-btn" onclick={next} disabled={selectedIndex === photos.length - 1} title="Next (→)">›</button>
+          <button class="lb-btn lb-delete" onclick={deletePhoto} title="Move to trash">🗑</button>
+        </div>
       </div>
-      <button class="lightbox-close" onclick={() => selectedPhoto = null}>✕</button>
+
+      <button class="lightbox-close" onclick={closeLightbox}>✕</button>
     </div>
   </div>
 {/if}
@@ -477,17 +531,76 @@
     box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
   }
 
+  .lightbox-bar {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+
   .lightbox-info {
     display: flex;
-    gap: 1rem;
+    gap: 0.75rem;
     align-items: center;
     color: var(--text-secondary);
     font-size: 0.85rem;
+    min-width: 0;
   }
 
   .lightbox-name {
     color: var(--text-primary);
     font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 280px;
+  }
+
+  .lightbox-counter {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    flex-shrink: 0;
+  }
+
+  .lightbox-actions {
+    display: flex;
+    gap: 0.4rem;
+    flex-shrink: 0;
+  }
+
+  .lb-btn {
+    width: 2.2rem;
+    height: 2.2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.3rem;
+    border-radius: var(--radius-sm);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    transition: background 0.1s, color 0.1s, opacity 0.1s;
+  }
+
+  .lb-btn:hover:not(:disabled) {
+    background: var(--bg-hover);
+  }
+
+  .lb-btn:disabled {
+    opacity: 0.3;
+    cursor: default;
+  }
+
+  .lb-delete {
+    font-size: 1rem;
+    border-color: transparent;
+  }
+
+  .lb-delete:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.15);
+    border-color: rgba(239, 68, 68, 0.4);
+    color: #f87171;
   }
 
   .lightbox-close {
