@@ -13,6 +13,8 @@ pub struct PhotoEntry {
     filename: String,
     /// Unix timestamp in milliseconds (EXIF date preferred, mtime fallback)
     timestamp: i64,
+    /// File size in bytes
+    size: u64,
 }
 
 fn is_image(path: &Path) -> bool {
@@ -75,10 +77,12 @@ fn scan_directory(path: String) -> Result<Vec<PhotoEntry>, String> {
         .filter_map(|e| {
             let p = e.path();
             let timestamp = exif_timestamp(p).or_else(|| mtime_timestamp(p)).unwrap_or(0);
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
             Some(PhotoEntry {
                 path: p.to_string_lossy().into_owned(),
                 filename: e.file_name().to_string_lossy().into_owned(),
                 timestamp,
+                size,
             })
         })
         .collect();

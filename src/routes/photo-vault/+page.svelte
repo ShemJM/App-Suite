@@ -6,51 +6,97 @@
     path: string;
     filename: string;
     timestamp: number;
+    size: number;
   }
 
   interface MonthGroup {
-    key: string;       // "2024-06"
-    label: string;     // "June 2024"
+    key: string;
+    label: string;
     photos: PhotoEntry[];
   }
 
+  interface BurstGroup {
+    photos: PhotoEntry[];
+    spanSeconds: number;
+  }
+
+  type SortKey = 'date-desc' | 'date-asc' | 'size-desc' | 'size-asc';
+  type View = 'timeline' | 'bursts';
+
   const MONTH_NAMES = [
-    'January', 'February', 'March', 'April', 'May', 'June',
-    'July', 'August', 'September', 'October', 'November', 'December',
+    'January','February','March','April','May','June',
+    'July','August','September','October','November','December',
   ];
 
+  const BURST_GAP_MS = 20_000; // 20 seconds
+
+  // ── State ────────────────────────────────────────────────────────────────
   let folderPath = $state<string | null>(
     typeof localStorage !== 'undefined' ? localStorage.getItem('photo-vault-folder') : null
   );
   let photos = $state<PhotoEntry[]>([]);
   let scanning = $state(false);
   let scanError = $state<string | null>(null);
+  let sortKey = $state<SortKey>('date-desc');
+  let view = $state<View>('timeline');
   let selectedIndex = $state<number | null>(null);
-  let selectedPhoto = $derived(selectedIndex !== null ? photos[selectedIndex] : null);
+
+  // ── Derived ──────────────────────────────────────────────────────────────
+  let sortedPhotos = $derived.by((): PhotoEntry[] => {
+    const s = [...photos];
+    switch (sortKey) {
+      case 'date-asc':  return s.sort((a, b) => a.timestamp - b.timestamp);
+      case 'date-desc': return s.sort((a, b) => b.timestamp - a.timestamp);
+      case 'size-asc':  return s.sort((a, b) => a.size - b.size);
+      case 'size-desc': return s.sort((a, b) => b.size - a.size);
+    }
+  });
+
+  let selectedPhoto = $derived(
+    selectedIndex !== null ? sortedPhotos[selectedIndex] : null
+  );
 
   let monthGroups = $derived.by((): MonthGroup[] => {
-    if (!photos.length) return [];
-
     const map = new Map<string, PhotoEntry[]>();
-    for (const photo of photos) {
+    for (const photo of sortedPhotos) {
       const d = new Date(photo.timestamp);
       const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(photo);
     }
-
-    return Array.from(map.entries())
-      .sort(([a], [b]) => b.localeCompare(a))
-      .map(([key, group]) => {
-        const [year, month] = key.split('-').map(Number);
-        return {
-          key,
-          label: `${MONTH_NAMES[month - 1]} ${year}`,
-          photos: group,
-        };
-      });
+    // Preserve display order (already sorted by sortKey)
+    return Array.from(map.entries()).map(([key, group]) => {
+      const [year, month] = key.split('-').map(Number);
+      return { key, label: `${MONTH_NAMES[month - 1]} ${year}`, photos: group };
+    });
   });
 
+  let burstGroups = $derived.by((): BurstGroup[] => {
+    // Always group by date regardless of current sort
+    const byDate = [...photos].sort((a, b) => a.timestamp - b.timestamp);
+    const groups: BurstGroup[] = [];
+    let run: PhotoEntry[] = [];
+
+    for (const photo of byDate) {
+      if (run.length === 0) {
+        run = [photo];
+      } else if (photo.timestamp - run[run.length - 1].timestamp <= BURST_GAP_MS) {
+        run.push(photo);
+      } else {
+        if (run.length >= 2) {
+          groups.push({ photos: run, spanSeconds: Math.round((run[run.length - 1].timestamp - run[0].timestamp) / 1000) });
+        }
+        run = [photo];
+      }
+    }
+    if (run.length >= 2) {
+      groups.push({ photos: run, spanSeconds: Math.round((run[run.length - 1].timestamp - run[0].timestamp) / 1000) });
+    }
+
+    return groups.sort((a, b) => b.photos.length - a.photos.length);
+  });
+
+  // ── Actions ──────────────────────────────────────────────────────────────
   async function pickFolder() {
     const selected = await openDialog({ directory: true, multiple: false, title: 'Select Photo Folder' });
     if (!selected || Array.isArray(selected)) return;
@@ -73,21 +119,11 @@
   }
 
   $effect(() => {
-    if (folderPath && photos.length === 0 && !scanning) {
-      scan(folderPath);
-    }
+    if (folderPath && photos.length === 0 && !scanning) scan(folderPath);
   });
 
-  function photoUrl(path: string) {
-    return convertFileSrc(path);
-  }
-
-  function folderName(path: string) {
-    return path.split('/').pop() ?? path;
-  }
-
   function selectPhoto(photo: PhotoEntry) {
-    selectedIndex = photos.indexOf(photo);
+    selectedIndex = sortedPhotos.indexOf(photo);
   }
 
   function prev() {
@@ -95,36 +131,44 @@
   }
 
   function next() {
-    if (selectedIndex !== null && selectedIndex < photos.length - 1) selectedIndex += 1;
+    if (selectedIndex !== null && selectedIndex < sortedPhotos.length - 1) selectedIndex += 1;
   }
 
-  function closeLightbox() {
-    selectedIndex = null;
-  }
+  function closeLightbox() { selectedIndex = null; }
 
   async function deletePhoto() {
     if (selectedIndex === null || !selectedPhoto) return;
     const path = selectedPhoto.path;
     const idx = selectedIndex;
-
-    // Remove from list first for instant feedback
-    photos = photos.filter((_, i) => i !== idx);
-
-    if (photos.length === 0) {
-      selectedIndex = null;
-    } else {
-      selectedIndex = Math.min(idx, photos.length - 1);
-    }
-
+    photos = photos.filter(p => p.path !== path);
+    selectedIndex = photos.length === 0 ? null : Math.min(idx, sortedPhotos.length - 1);
     await invoke('delete_photo', { path }).catch(console.error);
   }
 
   function handleKeydown(e: KeyboardEvent) {
     if (selectedIndex === null) return;
-    if (e.key === 'ArrowLeft') { e.preventDefault(); prev(); }
+    if (e.key === 'ArrowLeft')  { e.preventDefault(); prev(); }
     else if (e.key === 'ArrowRight') { e.preventDefault(); next(); }
-    else if (e.key === 'Delete') { e.preventDefault(); deletePhoto(); }
-    else if (e.key === 'Escape') closeLightbox();
+    else if (e.key === 'Delete')     { e.preventDefault(); deletePhoto(); }
+    else if (e.key === 'Escape')     closeLightbox();
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+  const photoUrl = (path: string) => convertFileSrc(path);
+  const folderName = (path: string) => path.split('/').pop() ?? path;
+
+  function formatSize(bytes: number): string {
+    if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MB`;
+    if (bytes >= 1_024)     return `${Math.round(bytes / 1_024)} KB`;
+    return `${bytes} B`;
+  }
+
+  function formatDate(ts: number): string {
+    return new Date(ts).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+  }
+
+  function formatTime(ts: number): string {
+    return new Date(ts).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
   }
 </script>
 
@@ -146,14 +190,47 @@
       {/if}
     </div>
 
-    {#if monthGroups.length > 0}
-      <nav class="month-nav">
-        {#each monthGroups as group}
-          <a class="month-link" href="#{group.key}">
-            <span class="month-name">{group.label}</span>
-            <span class="month-count">{group.photos.length}</span>
-          </a>
-        {/each}
+    {#if photos.length > 0}
+      <div class="sort-row">
+        <span class="sort-label">Sort</span>
+        <select bind:value={sortKey}>
+          <option value="date-desc">Date ↓</option>
+          <option value="date-asc">Date ↑</option>
+          <option value="size-desc">Size ↓</option>
+          <option value="size-asc">Size ↑</option>
+        </select>
+      </div>
+
+      <nav class="sidebar-nav">
+        <button
+          class="nav-item"
+          class:active={view === 'timeline'}
+          onclick={() => view = 'timeline'}
+        >
+          <span class="nav-icon">🗓</span>
+          <span class="nav-label">Timeline</span>
+          <span class="nav-count">{photos.length}</span>
+        </button>
+
+        <button
+          class="nav-item"
+          class:active={view === 'bursts'}
+          onclick={() => view = 'bursts'}
+        >
+          <span class="nav-icon">⚡</span>
+          <span class="nav-label">Burst Groups</span>
+          <span class="nav-count">{burstGroups.length}</span>
+        </button>
+
+        {#if view === 'timeline'}
+          <div class="month-divider"></div>
+          {#each monthGroups as group}
+            <a class="nav-item month-link" href="#{group.key}">
+              <span class="nav-label">{group.label}</span>
+              <span class="nav-count">{group.photos.length}</span>
+            </a>
+          {/each}
+        {/if}
       </nav>
     {/if}
   </aside>
@@ -189,7 +266,49 @@
         <button class="action-btn" onclick={pickFolder}>Try another folder</button>
       </div>
 
+    {:else if view === 'bursts'}
+      <!-- Burst groups view -->
+      {#if burstGroups.length === 0}
+        <div class="center-state">
+          <span class="hero-icon">✓</span>
+          <p class="hero-title">No burst groups found</p>
+          <p class="hero-sub">No photos taken within 20 seconds of each other</p>
+        </div>
+      {:else}
+        <div class="timeline">
+          <div class="burst-intro">
+            <strong>{burstGroups.length} burst group{burstGroups.length === 1 ? '' : 's'}</strong>
+            — photos taken within 20 seconds of each other. Click any photo to review it.
+          </div>
+
+          {#each burstGroups as group, gi (gi)}
+            <section class="burst-section">
+              <div class="month-header">
+                <h2 class="month-title">
+                  {formatDate(group.photos[0].timestamp)} · {formatTime(group.photos[0].timestamp)}
+                </h2>
+                <span class="month-count-pill">
+                  {group.photos.length} photos · {group.spanSeconds}s
+                </span>
+              </div>
+              <div class="photo-grid">
+                {#each group.photos as photo (photo.path)}
+                  <button
+                    class="photo-thumb"
+                    onclick={() => selectPhoto(photo)}
+                    title={photo.filename}
+                  >
+                    <img src={photoUrl(photo.path)} alt={photo.filename} loading="lazy" decoding="async" />
+                  </button>
+                {/each}
+              </div>
+            </section>
+          {/each}
+        </div>
+      {/if}
+
     {:else}
+      <!-- Timeline view -->
       <div class="timeline">
         {#each monthGroups as group (group.key)}
           <section class="month-section" id={group.key}>
@@ -204,12 +323,7 @@
                   onclick={() => selectPhoto(photo)}
                   title={photo.filename}
                 >
-                  <img
-                    src={photoUrl(photo.path)}
-                    alt={photo.filename}
-                    loading="lazy"
-                    decoding="async"
-                  />
+                  <img src={photoUrl(photo.path)} alt={photo.filename} loading="lazy" decoding="async" />
                 </button>
               {/each}
             </div>
@@ -230,18 +344,15 @@
       <div class="lightbox-bar">
         <div class="lightbox-info">
           <span class="lightbox-name">{selectedPhoto.filename}</span>
-          <span class="lightbox-date">
-            {new Date(selectedPhoto.timestamp).toLocaleDateString(undefined, {
-              year: 'numeric', month: 'long', day: 'numeric'
-            })}
-          </span>
-          <span class="lightbox-counter">{selectedIndex + 1} / {photos.length}</span>
+          <span class="lightbox-meta">{formatDate(selectedPhoto.timestamp)}</span>
+          <span class="lightbox-meta">{formatSize(selectedPhoto.size)}</span>
+          <span class="lightbox-counter">{selectedIndex + 1} / {sortedPhotos.length}</span>
         </div>
 
         <div class="lightbox-actions">
           <button class="lb-btn" onclick={prev} disabled={selectedIndex === 0} title="Previous (←)">‹</button>
-          <button class="lb-btn" onclick={next} disabled={selectedIndex === photos.length - 1} title="Next (→)">›</button>
-          <button class="lb-btn lb-delete" onclick={deletePhoto} title="Move to trash">🗑</button>
+          <button class="lb-btn" onclick={next} disabled={selectedIndex === sortedPhotos.length - 1} title="Next (→)">›</button>
+          <button class="lb-btn lb-delete" onclick={deletePhoto} title="Move to trash (Del)">🗑</button>
         </div>
       </div>
 
@@ -304,9 +415,7 @@
     transition: color 0.1s;
   }
 
-  .change-btn:hover {
-    color: var(--text-primary);
-  }
+  .change-btn:hover { color: var(--text-primary); }
 
   .open-folder-btn {
     width: 100%;
@@ -325,39 +434,88 @@
     color: #fff;
   }
 
-  .month-nav {
-    flex: 1;
-    overflow-y: auto;
-    padding: 0.5rem 0;
-  }
-
-  .month-link {
+  .sort-row {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 0.35rem 0.75rem;
-    font-size: 0.82rem;
-    color: var(--text-secondary);
-    border-radius: var(--radius-sm);
-    transition: background 0.1s, color 0.1s;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--border);
   }
 
-  .month-link:hover {
+  .sort-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+
+  .sort-row select {
+    flex: 1;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 0.78rem;
+    padding: 0.2rem 0.4rem;
+    cursor: pointer;
+    outline: none;
+  }
+
+  .sort-row select:focus { border-color: var(--accent); }
+
+  .sidebar-nav {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.4rem 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .month-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 0.4rem 0;
+  }
+
+  .nav-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.38rem 0.75rem;
+    border-radius: var(--radius-sm);
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    transition: background 0.1s, color 0.1s;
+    text-align: left;
+    text-decoration: none;
+  }
+
+  .nav-item:hover {
     background: var(--bg-hover);
     color: var(--text-primary);
   }
 
-  .month-name { flex: 1; }
+  .nav-item.active {
+    background: var(--accent-subtle);
+    color: var(--accent-hover);
+  }
 
-  .month-count {
+  .nav-icon { font-size: 0.85rem; width: 1.1rem; text-align: center; flex-shrink: 0; }
+  .nav-label { flex: 1; }
+
+  .nav-count {
     font-size: 0.72rem;
     color: var(--text-muted);
     background: var(--bg-hover);
     border-radius: 99px;
     padding: 0.05rem 0.4rem;
+    flex-shrink: 0;
   }
 
-  /* ── Main content ── */
+  .month-link { padding-left: 1.5rem; }
+
+  /* ── Main ── */
   .content {
     flex: 1;
     overflow-y: auto;
@@ -376,34 +534,11 @@
     color: var(--text-muted);
   }
 
-  .hero-icon {
-    font-size: 3rem;
-    opacity: 0.35;
-  }
-
-  .hero-title {
-    font-size: 1rem;
-    font-weight: 600;
-    color: var(--text-secondary);
-  }
-
-  .hero-sub {
-    font-size: 0.85rem;
-  }
-
-  .error-msg {
-    font-size: 0.85rem;
-    color: #f87171;
-    max-width: 380px;
-  }
-
-  .scan-path {
-    font-size: 0.75rem;
-    max-width: 340px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
+  .hero-icon    { font-size: 3rem; opacity: 0.35; }
+  .hero-title   { font-size: 1rem; font-weight: 600; color: var(--text-secondary); }
+  .hero-sub     { font-size: 0.85rem; }
+  .error-msg    { font-size: 0.85rem; color: #f87171; max-width: 380px; }
+  .scan-path    { font-size: 0.75rem; max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .action-btn {
     margin-top: 0.5rem;
@@ -416,9 +551,7 @@
     transition: background 0.15s;
   }
 
-  .action-btn:hover {
-    background: var(--accent-hover);
-  }
+  .action-btn:hover { background: var(--accent-hover); }
 
   .spinner-large {
     width: 2rem;
@@ -432,7 +565,7 @@
 
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  /* ── Timeline ── */
+  /* ── Timeline / Burst shared ── */
   .timeline {
     padding: 1.5rem 1.5rem 3rem;
     display: flex;
@@ -440,7 +573,16 @@
     gap: 2.5rem;
   }
 
-  .month-section {
+  .burst-intro {
+    font-size: 0.83rem;
+    color: var(--text-secondary);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 0.6rem 0.9rem;
+  }
+
+  .month-section, .burst-section {
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
@@ -458,7 +600,7 @@
   }
 
   .month-title {
-    font-size: 1.1rem;
+    font-size: 1.05rem;
     font-weight: 700;
     letter-spacing: -0.02em;
     color: var(--text-primary);
@@ -555,7 +697,13 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 280px;
+    max-width: 240px;
+  }
+
+  .lightbox-meta {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    flex-shrink: 0;
   }
 
   .lightbox-counter {
@@ -584,20 +732,10 @@
     transition: background 0.1s, color 0.1s, opacity 0.1s;
   }
 
-  .lb-btn:hover:not(:disabled) {
-    background: var(--bg-hover);
-  }
+  .lb-btn:hover:not(:disabled) { background: var(--bg-hover); }
+  .lb-btn:disabled { opacity: 0.3; cursor: default; }
 
-  .lb-btn:disabled {
-    opacity: 0.3;
-    cursor: default;
-  }
-
-  .lb-delete {
-    font-size: 1rem;
-    border-color: transparent;
-  }
-
+  .lb-delete { font-size: 1rem; border-color: transparent; }
   .lb-delete:hover:not(:disabled) {
     background: rgba(239, 68, 68, 0.15);
     border-color: rgba(239, 68, 68, 0.4);
